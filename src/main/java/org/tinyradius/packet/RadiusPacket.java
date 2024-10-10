@@ -865,7 +865,7 @@ public class RadiusPacket {
 				}
 			}
 			if (!exists) {
-				this.attributes.add(new RadiusAttribute(MESSAGE_AUTHENTICATOR, new byte[16]));
+				this.attributes.addFirst(new RadiusAttribute(MESSAGE_AUTHENTICATOR, new byte[16]));
 			}
 		}
 
