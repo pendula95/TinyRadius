@@ -13,6 +13,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -27,6 +28,9 @@ import org.tinyradius.dictionary.DefaultDictionary;
 import org.tinyradius.dictionary.Dictionary;
 import org.tinyradius.util.RadiusException;
 import org.tinyradius.util.RadiusUtil;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * This class represents a Radius packet. Subclasses provide convenience methods
@@ -848,6 +852,21 @@ public class RadiusPacket {
 			// (User-Password attribute needs the authenticator)
 			authenticator = createRequestAuthenticator(sharedSecret);
 			encodeRequestAttributes(sharedSecret);
+		} else {
+			//To mitigate CVE-2024-3596 we MUST add Message-Authenticator attribute to all responses
+			boolean exists = false;
+			for (Iterator i = this.attributes.iterator(); i.hasNext(); ) {
+				RadiusAttribute a = (RadiusAttribute) i.next();
+				//If already present in the packet we need to set it to sixteen octets of zero
+				if (a.getVendorId() == -1 && a.getAttributeType() == MESSAGE_AUTHENTICATOR) {
+					a.setAttributeData(new byte[16]);
+					exists = true;
+					break;
+				}
+			}
+			if (!exists) {
+				this.attributes.add(new RadiusAttribute(MESSAGE_AUTHENTICATOR, new byte[16]));
+			}
 		}
 
 		byte[] attributes = getAttributeBytes();
@@ -857,6 +876,18 @@ public class RadiusPacket {
 
 		// response packet authenticator
 		if (request != null) {
+			try {
+				//calculate Message-Authenticator according to RFC2869
+				byte[] messageAuthenticator = createResponseMessageAuthenticator(sharedSecret, packetLength, attributes, request.getAuthenticator());
+				for (Iterator i = this.attributes.iterator(); i.hasNext();) {
+					RadiusAttribute a = (RadiusAttribute) i.next();
+					if (a.getVendorId() == -1 && a.getAttributeType() == MESSAGE_AUTHENTICATOR) {
+						a.setAttributeData(messageAuthenticator);
+					}
+				}
+			} catch (InvalidKeyException ex) {
+				new RuntimeException("failed to create message authenticator", ex);
+			}
 			// after encoding attributes, create authenticator
 			authenticator = createResponseAuthenticator(sharedSecret, packetLength, attributes, request.getAuthenticator());
 		}
@@ -946,6 +977,19 @@ public class RadiusPacket {
 		md5.update(attributes, 0, attributes.length);
 		md5.update(RadiusUtil.getUtf8Bytes(sharedSecret));
 		return md5.digest();
+	}
+
+	protected byte[] createResponseMessageAuthenticator(String sharedSecret, int packetLength, byte[] attributes, byte[] requestAuthenticator) throws InvalidKeyException {
+		Mac hmacMd5 = getHmacMd5();
+		hmacMd5.reset();
+		hmacMd5.init(new SecretKeySpec(sharedSecret.getBytes(), hmacMd5.getAlgorithm()));
+		hmacMd5.update((byte) getPacketType());
+		hmacMd5.update((byte) getPacketIdentifier());
+		hmacMd5.update((byte) (packetLength >> 8));
+		hmacMd5.update((byte) (packetLength & 0x0ff));
+		hmacMd5.update(requestAuthenticator, 0, requestAuthenticator.length);
+		hmacMd5.update(attributes, 0, attributes.length);
+		return hmacMd5.doFinal();
 	}
 
 	/**
@@ -1117,6 +1161,22 @@ public class RadiusPacket {
 	}
 
 	/**
+	 * Returns a MD5 digest.
+	 *
+	 * @return MessageDigest object
+	 */
+	protected Mac getHmacMd5() {
+		if (hmacMd5 == null)
+			try {
+				hmacMd5 = Mac.getInstance("HmacMD5");
+			}
+			catch (NoSuchAlgorithmException nsae) {
+				throw new RuntimeException("Hmac is not available", nsae);
+			}
+		return hmacMd5;
+	}
+
+	/**
 	 * Encodes the attributes of this Radius packet to a byte array.
 	 * 
 	 * @return byte array with encoded attributes
@@ -1154,6 +1214,11 @@ public class RadiusPacket {
 	private MessageDigest md5Digest = null;
 
 	/**
+	 * hmacMd5 mac.
+	 */
+	private Mac hmacMd5 = null;
+
+	/**
 	 * Authenticator for this Radius packet.
 	 */
 	private byte[] authenticator = null;
@@ -1172,5 +1237,14 @@ public class RadiusPacket {
 	 * Random number generator.
 	 */
 	private static SecureRandom random = new SecureRandom();
+
+	/**
+	 * Radius attribute type for MS-CHAP-Challenge attribute.
+	 */
+
+	/**
+	 * Radius attribute type for Message-Authenticator attribute.
+	 */
+	private static final int MESSAGE_AUTHENTICATOR = 80;
 
 }
